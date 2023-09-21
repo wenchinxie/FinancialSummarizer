@@ -90,6 +90,8 @@ class FinancialStatementParser:
         self.last_sentence = ""
         self.combining_words = ["認列收入"]
         self.fourth_grade_account = None
+        self._cleaned_sentence = None
+        self._dates_locs = []
 
     def get_pandas_df(self):
         df = pd.DataFrame(
@@ -100,6 +102,8 @@ class FinancialStatementParser:
 
     def parse(self):
         for i, sentence in enumerate(self.content):
+            # Ignore all strings until reach to important subjects regions
+            # In case the programming misunderstands
             if not self.access_import_subjects:
                 self._does_reach_important_accounts(sentence)
                 continue
@@ -108,10 +112,14 @@ class FinancialStatementParser:
 
             print("length-----", len(sentence))
             print("s---", sentence)
-            cleaned_sentence = self._reform_sentence(i)
+            self._cleaned_sentence = self._reform_sentence(i)
+            print("reformed----", cleaned_sentence)
+
             if "月" in sentence:
-                # cleaned_sentence+=self._add_date_consumed(paragraphs[i+1])
-                date, cleaned_sentence = self._extract_date(cleaned_sentence)
+                (
+                    date,
+                    cleaned_sentence,
+                ) = self._reform_sentence_and_extract_dates_str_and_locs()
                 self.use_dates.extend(date)
 
             tokens = list(jieba.cut(cleaned_sentence))
@@ -129,11 +137,12 @@ class FinancialStatementParser:
             )
 
     def _process_tokens(self, tokens, cleaned_sentence):
+        print(tokens)
+        print("cleaned_sentence", cleaned_sentence)
+
         for token in tokens:
             token = self.change_token(token)
-            print(token)
-            print("cleaned_sentence", cleaned_sentence)
-            print(self.subjects_dict.get(token, "No token"))
+            print("token get?", self.subjects_dict.get(token, "No token"))
             if self.subjects_dict.get(token) and re.search(r"\d", cleaned_sentence):
                 print("append data-------------------------------")
                 self._reset_fourth_grade_account_and_category(token)
@@ -175,9 +184,9 @@ class FinancialStatementParser:
             return last_cleaned_sentence + cur_cleaned_sentence
 
         tokens = jieba.cut(cur_cleaned_sentence)
-        for token in tokens:
-            if token in self.continued_words:
-                return last_cleaned_sentence + cur_cleaned_sentence
+
+        if any(token in self.continued_words for token in tokens):
+            return last_cleaned_sentence + cur_cleaned_sentence
 
         return cur_cleaned_sentence
 
@@ -237,37 +246,49 @@ class FinancialStatementParser:
             sentence,
         )
 
-    def _extract_date(self, sentence):
+    def _reform_sentence_and_extract_dates_str_and_locs(self):
         """Return dates and removed dates string from sentence"""
-        dates_str = set(re.findall(self.PERIOD_PATTERN, sentence))
+
+        dates_str = self._extract_dates_and_record_locs()
 
         # For the case: 111年8月1日 土地 房地產 設備
         # Except the date, all the tokens are what we need
-        removed_date_sentence = self.remove_dates(dates_str, sentence)
+        self._remove_date_str_from_sentence(dates_str)
+
         # TODO: If the situation is date, account,account,account
+        # TODO: add is_statement to avoid all paragraphs
         # like 111年6月1日 土地 房地產 待驗設備, then set it as use date
-        if not self._is_complete_date(
-            dates_str, sentence
-        ) and not self._are_all_tokens_subjects(removed_date_sentence):
-            return [], removed_date_sentence
 
-        return (
-            sorted([self.transform_date(date) for date in dates_str], reverse=True),
-            removed_date_sentence,
+        if not self._is_complete_date(dates_str) and not self._are_all_tokens_subjects(
+            self._cleaned_sentence
+        ):
+            pass
+
+        transformed_dates_str = sorted(
+            [self.transform_date(date) for date in dates_str], reverse=True
         )
+        self.use_dates.extend(transformed_dates_str)
 
-    @staticmethod
-    def remove_dates(dates_str, sentence):
+    def _extract_dates_and_record_locs(self):
+        matches = re.finditer(self.PERIOD_PATTERN, self._cleaned_sentence)
+
+        # record locs
+        dates_str = []
+        for match in matches:
+            self._dates_locs.append(match.span())
+            dates_str.append(match.group())
+
+        return dates_str
+
+    def _remove_date_str_from_sentence(self, dates_str):
         for date in dates_str:
-            sentence = re.sub(date, "", sentence)
-        return sentence
+            self._cleaned_sentence = re.sub(date, "", self._cleaned_sentence)
 
-    @staticmethod
-    def _is_complete_date(dates_str, sentence) -> bool:
-        return sum(len(s) for s in dates_str) == len(sentence)
+    def _is_complete_date(self, dates_str) -> bool:
+        return sum(len(s) for s in dates_str) == len(self._clean_sentence)
 
     def transform_date(self, s: str):
-        # Transorm date to D.C.
+        # Transorm date str to D.C.
         year = int(s[:3]) + 1911
 
         if not re.search("至|~", s):
@@ -293,7 +314,8 @@ class FinancialStatementParser:
             for num in matches:
                 cleaned_num = num.replace(",", "")
                 if ")" in cleaned_num:
-                    nums.append(-int(cleaned_num.replace(")", "")))
+                    remove_right_bucket_str = cleaned_num.replace(")", "")
+                    nums.append(-int(remove_right_bucket_str))
                 elif num == "-":
                     nums.append(0)
                 else:
