@@ -1,11 +1,10 @@
-from typing import Dict
-
 import re
 from datetime import datetime
+from typing import Dict
+
+import jieba
 import pandas as pd
 import pypdfium2 as pdfium
-import jieba
-
 
 JIEBA_USERDICT = "financial_statements.txt"
 
@@ -39,9 +38,15 @@ class FinancialStatementParser:
         self.pdf = pdfium.PdfDocument(pdf_path)
         self.data = []
         self.use_dates = []
-        self.duplicated_accounts = ["成本", "其他", "合計"]
+        self.referred_accounts = [
+            "其他",
+            "合計",
+            "匯率影響數",
+        ]
+        self.duplicated_accounts = ["成本"]
         self.unwanted_account = ["合計"]
         self.subjects_dict = self._load_subjects_dict()
+        self.unwanted_words = [" "]
 
     def get_pandas_df(self):
         df = pd.DataFrame(self.data, columns=["Account", "Subject", "Period", "Value"])
@@ -95,7 +100,7 @@ class FinancialStatementParser:
 
         # Add this to let needed tokens in a sentence correspond
         # to all the subject
-        subject_d = {subject: 0 for subject in self.duplicated_accounts}
+        subject_d = {subject: {"Count": 0} for subject in self.duplicated_accounts}
         main_subject = ""
         for text in subjects:
             if not text:
@@ -105,7 +110,9 @@ class FinancialStatementParser:
                 main_subject = text[2:]
                 continue
 
-            subject = f"{main_subject}-{text}" if text == "其他" else text
+            subject = (
+                f"{main_subject}-{text}" if text in self.referred_accounts else text
+            )
             subject_d[subject] = {"Count": 0, "Period": [], "Subject": main_subject}
 
         return subject_d
@@ -127,15 +134,20 @@ class FinancialStatementParser:
         self.fourth_grade_account = None
         self.use_dates = []
         self.last_append_date_idx = 0
+        print(self.subjects_dict)
         self.subjects_dict["成本"]["Period"] = []
 
     @staticmethod
     def _clean_sentence(sentence: str) -> str:
-        return re.sub(r" |\r|日", "", sentence)
+        return re.sub(r" |\r|日|－|\(註\d{0,}\)", "", sentence)
 
-    @staticmethod
-    def remove_spaces_between_words(sentence):
-        return re.sub(r"[\u3000 -]+([\u4e00-\u9fff]+)[\u3000 ]{0,}", r"\1", sentence)
+    def remove_unwanted_words_between_chinese(self, sentence):
+        unwanted_words = "".join(self.unwanted_words)
+        return re.sub(
+            rf"[\u3000{unwanted_words}]+([\u4e00-\u9fff]+)[\u3000 ]{0,}",
+            r"\1",
+            sentence,
+        )
 
     def _extract_date(self, sentence):
         """Return dates and removed dates string from sentence"""
@@ -173,7 +185,7 @@ class FinancialStatementParser:
 
     def _get_paragraphs_from_page(self, page):
         paragraphs = page.get_textpage().get_text_range()
-        return self.remove_spaces_between_words(paragraphs).split("\n")
+        return self.remove_unwanted_words_between_chinese(paragraphs).split("\n")
 
     def extract_subject_nums(self, sentence):
         matches = re.findall(self.SUBJECT_PATTERN, sentence)
@@ -195,14 +207,14 @@ class FinancialStatementParser:
 
     def change_token(self, token):
         # Use for other account, since this account exists in every subject
-        if token != "其他":
+        if token not in self.referred_accounts:
             return token
 
         elif not self.data:
             return token
 
         last_account = self.data[-1][0]
-        if not last_account.endswith("其他|合計"):
+        if not re.search(rf"[{''.join(self.referred_accounts)}]$", last_account):
             last_subject = self._reset_other_count(last_account)
             token = last_subject + "-" + token
             self.other_count -= 1
@@ -218,11 +230,12 @@ class FinancialStatementParser:
         return last_account_d["Subject"]
 
     def _append_data(self, token, nums):
+        print("tokens", token)
         subject_period = self.subjects_dict[token]["Period"]
         use_dates = [date for date in self.use_dates if not date in subject_period]
         # use_dates = self.use_dates
         print("all_dates", use_dates)
-        print("tokens", token)
+
         print(self.fourth_grade_account)
 
         if not self.fourth_grade_account or len(set(self.fourth_grade_account)) == 1:
